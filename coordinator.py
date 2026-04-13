@@ -14,6 +14,9 @@ from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, Upda
 
 from .const import API_URL, DOMAIN, LOGGER, UPDATE_INTERVAL_SECONDS
 
+# Standard browser user-agent to avoid 403 Forbidden
+USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+
 class CPTrainsCoordinator(DataUpdateCoordinator):
     """Class to manage fetching CP Trains data."""
 
@@ -32,10 +35,12 @@ class CPTrainsCoordinator(DataUpdateCoordinator):
         train_date = datetime.now().strftime("%Y-%m-%d")
         url = API_URL.format(train_number=self.train_number, train_date=train_date)
 
+        headers = {"User-Agent": USER_AGENT}
+
         try:
             async with async_timeout.timeout(10):
                 session = async_get_clientsession(self.hass)
-                async with session.get(url) as response:
+                async with session.get(url, headers=headers) as response:
                     if response.status != 200:
                         raise UpdateFailed(f"Error communicating with API: {response.status}")
 
