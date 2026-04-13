@@ -45,10 +45,10 @@ class CPTrainsCoordinator(DataUpdateCoordinator):
                         raise UpdateFailed(f"Error communicating with API: {response.status}")
 
                     data = await response.json()
-                    if not data:
-                        raise UpdateFailed("Empty response from API")
+                    if not data or "response" not in data:
+                        raise UpdateFailed("Unexpected response format from API")
 
-                    return self._parse_data(data)
+                    return self._parse_data(data["response"])
         except aiohttp.ClientError as err:
             raise UpdateFailed(f"Error communicating with API: {err}")
         except Exception as err:
@@ -56,12 +56,7 @@ class CPTrainsCoordinator(DataUpdateCoordinator):
 
     def _parse_data(self, data: dict[str, any]) -> dict[str, any]:
         """Parse the JSON response from CP API."""
-        # Main train info
-        train_info = data.get("Comboio", {})
-        if not train_info:
-            return {}
-
-        status_text = train_info.get("SituacaoComboio", "")
+        status_text = data.get("SituacaoComboio", "")
 
         # Parse stations
         stations = []
@@ -77,7 +72,7 @@ class CPTrainsCoordinator(DataUpdateCoordinator):
             if not passed:
                 all_passed = False
 
-            # Extract estimated time from Observacoes (e.g., "Hora Prevista: 12:45")
+            # Extract estimated time from Observacoes (e.g., "Hora Prevista: 12:45" or "Hora Prevista:12:45")
             estimated_time_str = scheduled_time_str
             match = re.search(r"Hora Prevista\s*:\s*(\d{2}:\d{2})", obs or "")
             if match:
@@ -113,11 +108,11 @@ class CPTrainsCoordinator(DataUpdateCoordinator):
 
         return {
             "train_number": self.train_number,
-            "service": train_info.get("TipoServico"),
-            "origin": train_info.get("DataHoraOrigem"), # Actually origin station name? Let's check API output structure.
-            "destination": train_info.get("DataHoraDestino"), # Actually destination station name?
-            "scheduled_departure": train_info.get("DataHoraOrigem"),
-            "scheduled_arrival": train_info.get("DataHoraDestino"),
+            "service": data.get("TipoServico"),
+            "origin": data.get("Origem"),
+            "destination": data.get("Destino"),
+            "scheduled_departure": data.get("DataHoraOrigem"),
+            "scheduled_arrival": data.get("DataHoraDestino"),
             "status_text": status_text,
             "state": state,
             "stations": stations
