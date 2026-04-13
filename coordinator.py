@@ -46,7 +46,6 @@ class CPTrainsCoordinator(DataUpdateCoordinator):
                     "Skipping update for train %s: outside of operating window",
                     self.train_number
                 )
-                # Return last known data but updated state if passed
                 if now > end_window and self.data:
                     self.data["state"] = "passed"
                 return self.data
@@ -90,6 +89,12 @@ class CPTrainsCoordinator(DataUpdateCoordinator):
         """Parse the JSON response from CP API."""
         status_text = data.get("SituacaoComboio", "")
 
+        # Extract global delay from status text (e.g., "atraso de 14 min")
+        delay = 0
+        delay_match = re.search(r"(\d+)\s*min", status_text)
+        if delay_match:
+            delay = int(delay_match.group(1))
+
         # Parse stations
         stations = []
         all_passed = True
@@ -104,46 +109,37 @@ class CPTrainsCoordinator(DataUpdateCoordinator):
             if not passed:
                 all_passed = False
 
-            # Extract estimated time from Observacoes
-            # e.g., "Hora Prevista: 12:45" or "Hora Prevista:12:45"
-            estimated_time_str = None
-            delay_minutes = None
-
+            # Determine estimated time
+            estimated_time_str = scheduled_time_str
             if not passed:
-                match = re.search(r"Hora Prevista\s*:\s*(\d{2}:\d{2})", obs or "")
+                # Check for specific station observation first
+                match = re.search(r"Hora Prevista\s*:\s*(\d{2}:\d{2})", obs)
                 if match:
                     estimated_time_str = match.group(1)
-                else:
-                    estimated_time_str = scheduled_time_str
-
-                # Compute delay in minutes
-                if scheduled_time_str and estimated_time_str:
+                elif delay > 0:
+                    # Apply global delay to schedule
                     try:
-                        fmt = "%H:%M"
-                        sched = datetime.strptime(scheduled_time_str, fmt)
-                        estim = datetime.strptime(estimated_time_str, fmt)
-                        delay_minutes = int((estim - sched).total_seconds() / 60)
-                    except ValueError:
+                        t = datetime.strptime(scheduled_time_str, "%H:%M")
+                        new_t = t + timedelta(minutes=delay)
+                        estimated_time_str = new_t.strftime("%H:%M")
+                    except (ValueError, TypeError):
                         pass
-            else:
-                # Already passed, we don't have accurate delay info anymore from this API response
-                estimated_time_str = scheduled_time_str
 
             stations.append({
                 "name": station_name,
                 "scheduled": scheduled_time_str,
                 "estimated": estimated_time_str,
-                "delay_minutes": delay_minutes,
                 "passed": passed
             })
 
         # Determine state
-        state = "unknown"
         if all_passed and stations:
             state = "passed"
-        elif "atraso" in status_text.lower():
+        elif status_text == "Programado":
+            state = "scheduled"
+        elif delay > 0:
             state = "delayed"
-        elif "circula" in status_text.lower():
+        else:
             state = "on_time"
 
         return {
@@ -153,7 +149,8 @@ class CPTrainsCoordinator(DataUpdateCoordinator):
             "destination": data.get("Destino"),
             "scheduled_departure": data.get("DataHoraOrigem"),
             "scheduled_arrival": data.get("DataHoraDestino"),
-            "status_text": status_text,
+            "status_text": status_text if status_text else "Em circulação",
+            "delay": delay,
             "state": state,
             "stations": stations
         }
