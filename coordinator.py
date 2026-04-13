@@ -9,6 +9,7 @@ import aiohttp
 import async_timeout
 
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
 from .const import API_URL, DOMAIN, LOGGER, UPDATE_INTERVAL_SECONDS
@@ -33,7 +34,8 @@ class CPTrainsCoordinator(DataUpdateCoordinator):
 
         try:
             async with async_timeout.timeout(10):
-                async with self.hass.helpers.aiohttp_client.async_get_clientsession().get(url) as response:
+                session = async_get_clientsession(self.hass)
+                async with session.get(url) as response:
                     if response.status != 200:
                         raise UpdateFailed(f"Error communicating with API: {response.status}")
 
