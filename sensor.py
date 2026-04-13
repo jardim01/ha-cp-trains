@@ -49,5 +49,6 @@ class CPTrainsSensor(CoordinatorEntity[CPTrainsCoordinator], SensorEntity):
             "scheduled_departure": data.get("scheduled_departure"),
             "scheduled_arrival": data.get("scheduled_arrival"),
             "status_text": data.get("status_text"),
+            "delay": data.get("delay"),
             "stations": data.get("stations")
         }
