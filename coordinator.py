@@ -29,12 +29,30 @@ class CPTrainsCoordinator(DataUpdateCoordinator):
             update_interval=timedelta(seconds=UPDATE_INTERVAL_SECONDS),
         )
         self.train_number = train_number
+        self._scheduled_departure: datetime | None = None
+        self._scheduled_arrival: datetime | None = None
 
     async def _async_update_data(self) -> dict[str, any]:
         """Fetch data from API."""
-        train_date = datetime.now().strftime("%Y-%m-%d")
-        url = API_URL.format(train_number=self.train_number, train_date=train_date)
+        now = datetime.now()
 
+        # Check if we should skip update based on schedule
+        if self._scheduled_departure and self._scheduled_arrival:
+            start_window = self._scheduled_departure - timedelta(minutes=30)
+            end_window = self._scheduled_arrival + timedelta(minutes=10)
+
+            if not (start_window <= now <= end_window):
+                LOGGER.debug(
+                    "Skipping update for train %s: outside of operating window",
+                    self.train_number
+                )
+                # Return last known data but updated state if passed
+                if now > end_window and self.data:
+                    self.data["state"] = "passed"
+                return self.data
+
+        train_date = now.strftime("%Y-%m-%d")
+        url = API_URL.format(train_number=self.train_number, train_date=train_date)
         headers = {"User-Agent": USER_AGENT}
 
         try:
@@ -48,7 +66,21 @@ class CPTrainsCoordinator(DataUpdateCoordinator):
                     if not data or "response" not in data:
                         raise UpdateFailed("Unexpected response format from API")
 
-                    return self._parse_data(data["response"])
+                    parsed_data = self._parse_data(data["response"])
+
+                    # Store schedule for smart polling
+                    if parsed_data.get("scheduled_departure"):
+                        try:
+                            self._scheduled_departure = datetime.strptime(
+                                parsed_data["scheduled_departure"], "%d/%m/%Y %H:%M:%S"
+                            )
+                            self._scheduled_arrival = datetime.strptime(
+                                parsed_data["scheduled_arrival"], "%d/%m/%Y %H:%M:%S"
+                            )
+                        except ValueError:
+                            pass
+
+                    return parsed_data
         except aiohttp.ClientError as err:
             raise UpdateFailed(f"Error communicating with API: {err}")
         except Exception as err:
@@ -72,22 +104,30 @@ class CPTrainsCoordinator(DataUpdateCoordinator):
             if not passed:
                 all_passed = False
 
-            # Extract estimated time from Observacoes (e.g., "Hora Prevista: 12:45" or "Hora Prevista:12:45")
-            estimated_time_str = scheduled_time_str
-            match = re.search(r"Hora Prevista\s*:\s*(\d{2}:\d{2})", obs or "")
-            if match:
-                estimated_time_str = match.group(1)
+            # Extract estimated time from Observacoes
+            # e.g., "Hora Prevista: 12:45" or "Hora Prevista:12:45"
+            estimated_time_str = None
+            delay_minutes = None
 
-            # Compute delay in minutes
-            delay_minutes = 0
-            if scheduled_time_str and estimated_time_str:
-                try:
-                    fmt = "%H:%M"
-                    sched = datetime.strptime(scheduled_time_str, fmt)
-                    estim = datetime.strptime(estimated_time_str, fmt)
-                    delay_minutes = int((estim - sched).total_seconds() / 60)
-                except ValueError:
-                    pass
+            if not passed:
+                match = re.search(r"Hora Prevista\s*:\s*(\d{2}:\d{2})", obs or "")
+                if match:
+                    estimated_time_str = match.group(1)
+                else:
+                    estimated_time_str = scheduled_time_str
+
+                # Compute delay in minutes
+                if scheduled_time_str and estimated_time_str:
+                    try:
+                        fmt = "%H:%M"
+                        sched = datetime.strptime(scheduled_time_str, fmt)
+                        estim = datetime.strptime(estimated_time_str, fmt)
+                        delay_minutes = int((estim - sched).total_seconds() / 60)
+                    except ValueError:
+                        pass
+            else:
+                # Already passed, we don't have accurate delay info anymore from this API response
+                estimated_time_str = scheduled_time_str
 
             stations.append({
                 "name": station_name,
