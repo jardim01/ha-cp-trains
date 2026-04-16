@@ -11,6 +11,7 @@ import async_timeout
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
+from homeassistant.util import dt as dt_util
 
 from .const import API_URL, DOMAIN, LOGGER, UPDATE_INTERVAL_SECONDS
 
@@ -34,7 +35,7 @@ class CPTrainsCoordinator(DataUpdateCoordinator):
 
     async def _async_update_data(self) -> dict[str, any]:
         """Fetch data from API."""
-        now = datetime.now()
+        now = dt_util.now()
 
         # Check if we should skip update based on schedule
         if self._scheduled_departure and self._scheduled_arrival:
@@ -67,23 +68,47 @@ class CPTrainsCoordinator(DataUpdateCoordinator):
 
                     parsed_data = self._parse_data(data["response"])
 
-                    # Store schedule for smart polling
+                    # Store schedule for smart polling (convert ISO strings back to aware datetimes)
                     if parsed_data.get("scheduled_departure"):
-                        try:
-                            self._scheduled_departure = datetime.strptime(
-                                parsed_data["scheduled_departure"], "%d/%m/%Y %H:%M:%S"
-                            )
-                            self._scheduled_arrival = datetime.strptime(
-                                parsed_data["scheduled_arrival"], "%d/%m/%Y %H:%M:%S"
-                            )
-                        except ValueError:
-                            pass
+                        self._scheduled_departure = dt_util.parse_datetime(parsed_data["scheduled_departure"])
+                        self._scheduled_arrival = dt_util.parse_datetime(parsed_data["scheduled_arrival"])
 
                     return parsed_data
         except aiohttp.ClientError as err:
             raise UpdateFailed(f"Error communicating with API: {err}")
         except Exception as err:
             raise UpdateFailed(f"Unexpected error: {err}")
+
+    def _to_utc_iso(self, date_str: str | None) -> str | None:
+        """Convert CP date string (Lisbon time) to UTC ISO format."""
+        if not date_str:
+            return None
+        try:
+            # Parse CP format: 13/04/2026 18:30:00
+            naive_dt = datetime.strptime(date_str, "%d/%m/%Y %H:%M:%S")
+            # Localize to Lisbon time (CP API uses Lisbon time)
+            # Use dt_util to handle timezones correctly in HA
+            aware_dt = dt_util.as_utc(dt_util.now().replace(
+                year=naive_dt.year,
+                month=naive_dt.month,
+                day=naive_dt.day,
+                hour=naive_dt.hour,
+                minute=naive_dt.minute,
+                second=naive_dt.second,
+                microsecond=0
+            ).astimezone(dt_util.get_time_zone("Europe/Lisbon")))
+
+            # Re-calculating correctly: naive -> localized -> utc
+            # Actually, let's use a cleaner way with dt_util
+            tz = dt_util.get_time_zone("Europe/Lisbon")
+            localized_dt = datetime(
+                naive_dt.year, naive_dt.month, naive_dt.day,
+                naive_dt.hour, naive_dt.minute, naive_dt.second,
+                tzinfo=tz
+            )
+            return dt_util.as_utc(localized_dt).isoformat().replace("+00:00", "Z")
+        except (ValueError, TypeError):
+            return date_str
 
     def _parse_data(self, data: dict[str, any]) -> dict[str, any]:
         """Parse the JSON response from CP API."""
@@ -147,8 +172,8 @@ class CPTrainsCoordinator(DataUpdateCoordinator):
             "service": data.get("TipoServico"),
             "origin": data.get("Origem"),
             "destination": data.get("Destino"),
-            "scheduled_departure": data.get("DataHoraOrigem"),
-            "scheduled_arrival": data.get("DataHoraDestino"),
+            "scheduled_departure": self._to_utc_iso(data.get("DataHoraOrigem")),
+            "scheduled_arrival": self._to_utc_iso(data.get("DataHoraDestino")),
             "status_text": status_text if status_text else "Em circulação",
             "delay": delay,
             "state": state,
