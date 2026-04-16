@@ -79,40 +79,30 @@ class CPTrainsCoordinator(DataUpdateCoordinator):
         except Exception as err:
             raise UpdateFailed(f"Unexpected error: {err}")
 
-    def _to_utc_iso(self, date_str: str | None) -> str | None:
+    def _to_utc_iso(self, date_str: str | None, base_date: datetime | None = None) -> str | None:
         """Convert CP date string (Lisbon time) to UTC ISO format."""
         if not date_str:
             return None
         try:
-            # Parse CP format: 13/04/2026 18:30:00
-            naive_dt = datetime.strptime(date_str, "%d/%m/%Y %H:%M:%S")
-            # Localize to Lisbon time (CP API uses Lisbon time)
-            # Use dt_util to handle timezones correctly in HA
-            aware_dt = dt_util.as_utc(dt_util.now().replace(
-                year=naive_dt.year,
-                month=naive_dt.month,
-                day=naive_dt.day,
-                hour=naive_dt.hour,
-                minute=naive_dt.minute,
-                second=naive_dt.second,
-                microsecond=0
-            ).astimezone(dt_util.get_time_zone("Europe/Lisbon")))
-
-            # Re-calculating correctly: naive -> localized -> utc
-            # Actually, let's use a cleaner way with dt_util
             tz = dt_util.get_time_zone("Europe/Lisbon")
-            localized_dt = datetime(
-                naive_dt.year, naive_dt.month, naive_dt.day,
-                naive_dt.hour, naive_dt.minute, naive_dt.second,
-                tzinfo=tz
-            )
+            if " " in date_str:
+                # Full date/time: 13/04/2026 18:30:00
+                naive_dt = datetime.strptime(date_str, "%d/%m/%Y %H:%M:%S")
+            elif base_date:
+                # Just time: 18:30
+                t = datetime.strptime(date_str, "%H:%M")
+                naive_dt = base_date.replace(hour=t.hour, minute=t.minute, second=0, microsecond=0)
+            else:
+                return date_str
+
+            localized_dt = naive_dt.replace(tzinfo=tz)
             return dt_util.as_utc(localized_dt).isoformat().replace("+00:00", "Z")
         except (ValueError, TypeError):
             return date_str
 
     def _parse_data(self, data: dict[str, any]) -> dict[str, any]:
         """Parse the JSON response from CP API."""
-        status_text = data.get("SituacaoComboio", "")
+        status_text = data.get("SituacaoComboio", "") or ""
 
         # Extract global delay from status text (e.g., "atraso de 14 min")
         delay = 0
@@ -120,40 +110,69 @@ class CPTrainsCoordinator(DataUpdateCoordinator):
         if delay_match:
             delay = int(delay_match.group(1))
 
+        # Base date for station times
+        base_date = None
+        dep_str = data.get("DataHoraOrigem")
+        if dep_str:
+            base_date = datetime.strptime(dep_str, "%d/%m/%Y %H:%M:%S")
+
         # Parse stations
         stations = []
         all_passed = True
         nodes = data.get("NodesPassagemComboio", [])
 
+        last_sched_naive = None
+        last_estim_naive = None
+        current_sched_date = base_date
+        current_estim_date = base_date
+
         for node in nodes:
             station_name = node.get("NomeEstacao")
             scheduled_time_str = node.get("HoraProgramada")
-            obs = node.get("Observacoes", "")
+            obs = node.get("Observacoes", "") or ""
             passed = node.get("ComboioPassou", False)
 
             if not passed:
                 all_passed = False
 
-            # Determine estimated time
-            estimated_time_str = scheduled_time_str
+            # Parse scheduled time and handle day wrap
+            if scheduled_time_str and current_sched_date:
+                t = datetime.strptime(scheduled_time_str, "%H:%M")
+                if last_sched_naive and t < last_sched_naive:
+                    current_sched_date += timedelta(days=1)
+                last_sched_naive = t
+                sched_iso = self._to_utc_iso(scheduled_time_str, current_sched_date)
+            else:
+                sched_iso = scheduled_time_str
+
+            # Determine estimated time and handle day wrap
+            estim_iso = sched_iso
             if not passed:
                 # Check for specific station observation first
                 match = re.search(r"Hora Prevista\s*:\s*(\d{2}:\d{2})", obs)
                 if match:
-                    estimated_time_str = match.group(1)
+                    estim_time_str = match.group(1)
                 elif delay > 0:
-                    # Apply global delay to schedule
                     try:
                         t = datetime.strptime(scheduled_time_str, "%H:%M")
                         new_t = t + timedelta(minutes=delay)
-                        estimated_time_str = new_t.strftime("%H:%M")
+                        estim_time_str = new_t.strftime("%H:%M")
                     except (ValueError, TypeError):
-                        pass
+                        estim_time_str = scheduled_time_str
+                else:
+                    estim_time_str = scheduled_time_str
+
+                if estim_time_str and current_estim_date:
+                    t = datetime.strptime(estim_time_str, "%H:%M")
+                    if last_estim_naive and t < last_estim_naive:
+                        current_estim_date += timedelta(days=1)
+                    last_estim_naive = t
+                    estim_iso = self._to_utc_iso(estim_time_str, current_estim_date)
 
             stations.append({
                 "name": station_name,
-                "scheduled": scheduled_time_str,
-                "estimated": estimated_time_str,
+                "scheduled": sched_iso,
+                "estimated": estim_iso,
                 "passed": passed
             })
 
