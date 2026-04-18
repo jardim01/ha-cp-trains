@@ -1,6 +1,7 @@
 """DataUpdateCoordinator for CP Trains."""
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime, timedelta
 import logging
 import re
@@ -40,12 +41,16 @@ class CPTrainsCoordinator(DataUpdateCoordinator):
         # Check if we should skip update based on schedule
         if self._scheduled_departure and self._scheduled_arrival:
             start_window = self._scheduled_departure - timedelta(minutes=30)
-            end_window = self._scheduled_arrival + timedelta(minutes=10)
+
+            # Use last known delay to adjust end window
+            last_delay = self.data.get("delay", 0) if self.data else 0
+            end_window = self._scheduled_arrival + timedelta(minutes=last_delay + 10)
 
             if not (start_window <= now <= end_window):
                 LOGGER.debug(
-                    "Skipping update for train %s: outside of operating window",
-                    self.train_number
+                    "Skipping update for train %s: outside of operating window (delay: %s)",
+                    self.train_number,
+                    last_delay
                 )
                 if now > end_window and self.data:
                     self.data["state"] = "passed"
@@ -55,29 +60,34 @@ class CPTrainsCoordinator(DataUpdateCoordinator):
         url = API_URL.format(train_number=self.train_number, train_date=train_date)
         headers = {"User-Agent": USER_AGENT}
 
-        try:
-            async with async_timeout.timeout(10):
-                session = async_get_clientsession(self.hass)
-                async with session.get(url, headers=headers) as response:
-                    if response.status != 200:
-                        raise UpdateFailed(f"Error communicating with API: {response.status}")
+        # Retry logic: 3 attempts with 30s timeout
+        for attempt in range(3):
+            try:
+                async with async_timeout.timeout(30):
+                    session = async_get_clientsession(self.hass)
+                    async with session.get(url, headers=headers) as response:
+                        if response.status != 200:
+                            raise UpdateFailed(f"Error communicating with API: {response.status}")
 
-                    data = await response.json()
-                    if not data or "response" not in data:
-                        raise UpdateFailed("Unexpected response format from API")
+                        data = await response.json()
+                        if not data or "response" not in data:
+                            raise UpdateFailed("Unexpected response format from API")
 
-                    parsed_data = self._parse_data(data["response"])
+                        parsed_data = self._parse_data(data["response"])
 
-                    # Store schedule for smart polling (convert ISO strings back to aware datetimes)
-                    if parsed_data.get("scheduled_departure"):
-                        self._scheduled_departure = dt_util.parse_datetime(parsed_data["scheduled_departure"])
-                        self._scheduled_arrival = dt_util.parse_datetime(parsed_data["scheduled_arrival"])
+                        # Store schedule for smart polling (convert ISO strings back to aware datetimes)
+                        if parsed_data.get("scheduled_departure"):
+                            self._scheduled_departure = dt_util.parse_datetime(parsed_data["scheduled_departure"])
+                            self._scheduled_arrival = dt_util.parse_datetime(parsed_data["scheduled_arrival"])
 
-                    return parsed_data
-        except aiohttp.ClientError as err:
-            raise UpdateFailed(f"Error communicating with API: {err}")
-        except Exception as err:
-            raise UpdateFailed(f"Unexpected error: {err}")
+                        return parsed_data
+            except (aiohttp.ClientError, asyncio.TimeoutError, UpdateFailed) as err:
+                if attempt == 2:
+                    raise UpdateFailed(f"Error communicating with API after 3 attempts: {err}")
+                LOGGER.warning("Attempt %s failed for train %s: %s. Retrying...", attempt + 1, self.train_number, err)
+                await asyncio.sleep(2)
+            except Exception as err:
+                raise UpdateFailed(f"Unexpected error: {err}")
 
     def _to_utc_iso(self, date_str: str | None, base_date: datetime | None = None) -> str | None:
         """Convert CP date string (Lisbon time) to UTC ISO format."""
