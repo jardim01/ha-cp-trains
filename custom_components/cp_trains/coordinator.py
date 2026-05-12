@@ -38,6 +38,16 @@ class CPTrainsCoordinator(DataUpdateCoordinator):
         """Fetch data from API."""
         now = dt_util.now()
 
+        # Reset schedule if it's for a past day to fetch current day's schedule
+        if self._scheduled_departure and self._scheduled_departure.date() < now.date():
+            LOGGER.debug(
+                "Resetting schedule for train %s as it's a new day (previous departure: %s)",
+                self.train_number,
+                self._scheduled_departure
+            )
+            self._scheduled_departure = None
+            self._scheduled_arrival = None
+
         # Check if we should skip update based on schedule
         if self._scheduled_departure and self._scheduled_arrival:
             start_window = self._scheduled_departure - timedelta(minutes=30)
